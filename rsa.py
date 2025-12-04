@@ -1,5 +1,6 @@
 import random
 import math
+from hash import sha256
 
 # Miller-Rabin primality test
 def _is_probable_prime(n, k=10):
@@ -114,3 +115,18 @@ def deserialize_public(data: bytes) -> tuple:
     s = data.decode()
     e_str, n_str = s.split(",", 1)
     return (int(e_str), int(n_str))
+
+# Signing and verification
+def rsa_sign(message: bytes, privkey: tuple) -> bytes:
+    d, n = privkey
+    h = int.from_bytes(sha256(message), 'big')
+    sig = pow(h, d, n)
+    k = (n.bit_length() + 7) // 8
+    return sig.to_bytes(k, 'big')
+
+def rsa_verify(message: bytes, signature: bytes, pubkey: tuple) -> bool:
+    e, n = pubkey
+    sig_int = int.from_bytes(signature, 'big')
+    h_from_sig = pow(sig_int, e, n)
+    h_actual = int.from_bytes(sha256(message), 'big')
+    return h_from_sig == h_actual

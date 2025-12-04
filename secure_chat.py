@@ -40,23 +40,36 @@ def server_handshake(conn: socket.socket, provided_key: str = None) -> str:
     if enc_b64 is None:
         raise ConnectionError("Client menutup koneksi saat handshake.")
     try:
+        # decrypt DES key
         enc = base64.b64decode(enc_b64)
         decrypted_padded = rsa.rsa_decrypt(enc, priv)
         stripped = decrypted_padded.lstrip(b'\x00')
-
-        # if empty, fallback to decrypted_padded
         if not stripped:
             stripped = decrypted_padded
-        # ensure we take at most 8 bytes (DES key length)
-        if len(stripped) > 8:
-            des_key_bytes = stripped[-8:]
-        else:
-            des_key_bytes = stripped
+        des_key_bytes = stripped[-8:] if len(stripped) > 8 else stripped
         des_key = des_key_bytes.decode('ascii', errors='ignore')
-        # if decoded length < 8, pad with 'A' (should not happen if client sends correct)
         if len(des_key) < 8:
             des_key = des_key.ljust(8, "A")
-        print("[INFO] Handshake selesai. DES key diterima.")
+        print(f"[INFO] DES key diterima: {des_key}")
+
+        # Receive signature and client public key
+        sig_b64 = recv_line(conn)
+        if sig_b64 is None:
+            raise ConnectionError("Client menutup koneksi saat handshake.")
+        signature = base64.b64decode(sig_b64)
+        # print(f"[DEBUG] signature diterima: {sig_b64.decode()}")
+
+        client_pub_line = recv_line(conn)
+        if client_pub_line is None:
+            raise ConnectionError("Client menutup koneksi saat handshake.")
+        client_pub = rsa.deserialize_public(client_pub_line)
+
+        # Verify signature
+        if rsa.rsa_verify(des_key.encode('ascii'), signature, client_pub):
+            print("[INFO] Signature client valid. Handshake aman.")
+        else:
+            raise RuntimeError("Signature client tidak valid. Handshake gagal.")
+
         return des_key
     except Exception as e:
         raise RuntimeError(f"Handshake gagal di server: {e}")
@@ -72,16 +85,27 @@ def client_handshake(sock: socket.socket, provided_key: str = None) -> str:
     if pub_line is None:
         raise ConnectionError("Server menutup koneksi saat handshake.")
     pub = rsa.deserialize_public(pub_line)
+
     # generate DES key (8 printable ASCII chars)
     alphabet = string.ascii_letters + string.digits
     des_key = ''.join(random.choice(alphabet) for _ in range(8))
     print(f"[INFO] Menghasilkan DES Key = {des_key}")
 
-    # encrypt with RSA
     try:
+        # encrypt DES key
         ciphertext = rsa.rsa_encrypt(des_key.encode('ascii'), pub)
         send_line(sock, base64.b64encode(ciphertext))
         print("[INFO] DES key terenkripsi terkirim ke server.")
+
+        # generate RSA keypair for signing
+        client_pub, client_priv = rsa.generate_keypair(bits=256)
+        signature = rsa.rsa_sign(des_key.encode('ascii'), client_priv)
+
+        send_line(sock, base64.b64encode(signature))
+        send_line(sock, rsa.serialize_public(client_pub))
+        # print(f"[DEBUG] signature: {base64.b64encode(signature).decode()}")
+        print("[INFO] Signature dan public key client terkirim.")
+
         return des_key
     except Exception as e:
         raise RuntimeError(f"Handshake gagal di client: {e}")
@@ -132,6 +156,7 @@ def send_input(sock, key: str):
 
 def run_server(host: str, port: int, key: str = None):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((host, port))
     server.listen(1)
     print(f"[INFO] Menunggu koneksi di {host}:{port}")
